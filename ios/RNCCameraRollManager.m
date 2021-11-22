@@ -33,7 +33,10 @@ RCT_ENUM_CONVERTER(PHAssetCollectionSubtype, (@{
    @"photo-stream": @(PHAssetCollectionSubtypeAlbumMyPhotoStream), // incorrect, but legacy
    @"photostream": @(PHAssetCollectionSubtypeAlbumMyPhotoStream),
    @"saved-photos": @(PHAssetCollectionSubtypeAny), // incorrect, but legacy correspondence in PHAssetCollectionSubtype
-   @"savedphotos": @(PHAssetCollectionSubtypeAny), // This was ALAssetsGroupSavedPhotos, seems to have no direct correspondence in PHAssetCollectionSubtype
+   @"savedphotos": @(PHAssetCollectionSubtypeAny), // This was ALAssetsGroupSavedPhotos, seems to have no direct correspondence in PHAssetCollectionSubtype,
+   @"favorites": @(PHAssetCollectionSubtypeSmartAlbumFavorites),
+   @"recents": @(PHAssetCollectionSubtypeSmartAlbumRecentlyAdded),
+   @"screenshots": @(PHAssetCollectionSubtypeSmartAlbumScreenshots),
 }), PHAssetCollectionSubtypeAny, integerValue)
 
 
@@ -49,7 +52,7 @@ RCT_ENUM_CONVERTER(PHAssetCollectionSubtype, (@{
   NSString *const lowercase = [mediaType lowercaseString];
   NSMutableArray *format = [NSMutableArray new];
   NSMutableArray *arguments = [NSMutableArray new];
-
+  
   if ([lowercase isEqualToString:@"photos"]) {
     [format addObject:@"mediaType = %d"];
     [arguments addObject:@(PHAssetMediaTypeImage)];
@@ -62,7 +65,7 @@ RCT_ENUM_CONVERTER(PHAssetCollectionSubtype, (@{
                   "'videos' or 'all'.", mediaType);
     }
   }
-
+  
   if (fromTime > 0) {
     NSDate* fromDate = [NSDate dateWithTimeIntervalSince1970:fromTime/1000];
     [format addObject:@"creationDate > %@"];
@@ -73,7 +76,7 @@ RCT_ENUM_CONVERTER(PHAssetCollectionSubtype, (@{
     [format addObject:@"creationDate <= %@"];
     [arguments addObject:toDate];
   }
-
+  
   // This case includes the "all" mediatype
   PHFetchOptions *const options = [PHFetchOptions new];
   if ([format count] > 0) {
@@ -96,34 +99,18 @@ static NSString *const kErrorUnableToLoad = @"E_UNABLE_TO_LOAD";
 static NSString *const kErrorAuthRestricted = @"E_PHOTO_LIBRARY_AUTH_RESTRICTED";
 static NSString *const kErrorAuthDenied = @"E_PHOTO_LIBRARY_AUTH_DENIED";
 
-typedef void (^PhotosAuthorizedBlock)(bool isLimited);
+typedef void (^PhotosAuthorizedBlock)(void);
 
 static void requestPhotoLibraryAccess(RCTPromiseRejectBlock reject, PhotosAuthorizedBlock authorizedBlock) {
-  PHAuthorizationStatus authStatus;
-  if (@available(iOS 14, *)) {
-    authStatus = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
-  } else {
-    authStatus = [PHPhotoLibrary authorizationStatus];
-  }
+  PHAuthorizationStatus authStatus = [PHPhotoLibrary authorizationStatus];
   if (authStatus == PHAuthorizationStatusRestricted) {
     reject(kErrorAuthRestricted, @"Access to photo library is restricted", nil);
   } else if (authStatus == PHAuthorizationStatusAuthorized) {
-    authorizedBlock(false);
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-  } else if (authStatus == PHAuthorizationStatusLimited) {
-#pragma clang diagnostic pop
-    authorizedBlock(true);
+    authorizedBlock();
   } else if (authStatus == PHAuthorizationStatusNotDetermined) {
-      if (@available(iOS 14, *)) {
-          [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus status) {
-              requestPhotoLibraryAccess(reject, authorizedBlock);
-          }];
-      } else {
-          [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
-              requestPhotoLibraryAccess(reject, authorizedBlock);
-          }];
-      }
+    [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
+      requestPhotoLibraryAccess(reject, authorizedBlock);
+    }];
   } else {
     reject(kErrorAuthDenied, @"Access to photo library was denied", nil);
   }
@@ -175,7 +162,7 @@ RCT_EXPORT_METHOD(saveToCameraRoll:(NSURLRequest *)request
   };
   void (^saveWithOptions)(void) = ^void() {
     if (![options[@"album"] isEqualToString:@""]) {
-
+  
       PHFetchOptions *fetchOptions = [[PHFetchOptions alloc] init];
       fetchOptions.predicate = [NSPredicate predicateWithFormat:@"title = %@", options[@"album"] ];
       collection = [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeAlbum
@@ -204,7 +191,7 @@ RCT_EXPORT_METHOD(saveToCameraRoll:(NSURLRequest *)request
     }
   };
 
-  void (^loadBlock)(bool isLimited) = ^void(bool isLimited) {
+  void (^loadBlock)(void) = ^void() {
     inputURI = request.URL;
     saveWithOptions();
   };
@@ -236,16 +223,14 @@ RCT_EXPORT_METHOD(getAlbums:(NSDictionary *)params
 
 static void RCTResolvePromise(RCTPromiseResolveBlock resolve,
                               NSArray<NSDictionary<NSString *, id> *> *assets,
-                              BOOL hasNextPage,
-                              bool isLimited)
+                              BOOL hasNextPage)
 {
   if (!assets.count) {
     resolve(@{
       @"edges": assets,
       @"page_info": @{
         @"has_next_page": @NO,
-      },
-      @"limited": @(isLimited)
+      }
     });
     return;
   }
@@ -255,8 +240,7 @@ static void RCTResolvePromise(RCTPromiseResolveBlock resolve,
       @"start_cursor": assets[0][@"node"][@"image"][@"uri"],
       @"end_cursor": assets[assets.count - 1][@"node"][@"image"][@"uri"],
       @"has_next_page": @(hasNextPage),
-    },
-    @"limited": @(isLimited)
+    }
   });
 }
 
@@ -281,14 +265,14 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
   BOOL __block includeLocation = [include indexOfObject:@"location"] != NSNotFound;
   BOOL __block includeImageSize = [include indexOfObject:@"imageSize"] != NSNotFound;
   BOOL __block includePlayableDuration = [include indexOfObject:@"playableDuration"] != NSNotFound;
-
+  
   // If groupTypes is "all", we want to fetch the SmartAlbum "all photos". Otherwise, all
   // other groupTypes values require the "album" collection type.
-  PHAssetCollectionType const collectionType = ([groupTypes isEqualToString:@"all"]
-                                                ? PHAssetCollectionTypeSmartAlbum
-                                                : PHAssetCollectionTypeAlbum);
+  PHAssetCollectionType const collectionType = ([groupTypes isEqualToString:@"album"]
+                                                ? PHAssetCollectionTypeAlbum
+                                                : PHAssetCollectionTypeSmartAlbum);
   PHAssetCollectionSubtype const collectionSubtype = [RCTConvert PHAssetCollectionSubtype:groupTypes];
-
+  
   // Predicate for fetching assets within a collection
   PHFetchOptions *const assetFetchOptions = [RCTConvert PHFetchOptionsFromMediaType:mediaType fromTime:fromTime toTime:toTime];
   // We can directly set the limit if we guarantee every image fetched will be
@@ -304,29 +288,29 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
     assetFetchOptions.fetchLimit = first + 1;
   }
   assetFetchOptions.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:NO]];
-
+  
   BOOL __block foundAfter = NO;
   BOOL __block hasNextPage = NO;
   BOOL __block resolvedPromise = NO;
   NSMutableArray<NSDictionary<NSString *, id> *> *assets = [NSMutableArray new];
-
+  
   // Filter collection name ("group")
   PHFetchOptions *const collectionFetchOptions = [PHFetchOptions new];
   collectionFetchOptions.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"endDate" ascending:NO]];
   if (groupName != nil) {
     collectionFetchOptions.predicate = [NSPredicate predicateWithFormat:@"localizedTitle = %@", groupName];
   }
-
+  
   BOOL __block stopCollections_;
   NSString __block *currentCollectionName;
 
-  requestPhotoLibraryAccess(reject, ^(bool isLimited){
+  requestPhotoLibraryAccess(reject, ^{
     void (^collectAsset)(PHAsset*, NSUInteger, BOOL*) = ^(PHAsset * _Nonnull asset, NSUInteger assetIdx, BOOL * _Nonnull stopAssets) {
       NSString *const uri = [NSString stringWithFormat:@"ph://%@", [asset localIdentifier]];
       NSString *_Nullable originalFilename = NULL;
       PHAssetResource *_Nullable resource = NULL;
       NSNumber* fileSize = [NSNumber numberWithInt:0];
-
+      
       if (includeFilename || includeFileSize || [mimeTypes count] > 0) {
         // Get underlying resources of an asset - this includes files as well as details about edited PHAssets
         // This is required for the filename and mimeType filtering
@@ -335,7 +319,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
         originalFilename = resource.originalFilename;
         fileSize = [resource valueForKey:@"fileSize"];
       }
-
+      
       // WARNING: If you add any code to `collectAsset` that may skip adding an
       // asset to the `assets` output array, you should do it inside this
       // block and ensure the logic for `collectAssetMayOmitAsset` above is
@@ -373,7 +357,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
         stopCollections_ = YES;
         hasNextPage = YES;
         RCTAssert(resolvedPromise == NO, @"Resolved the promise before we finished processing the results.");
-        RCTResolvePromise(resolve, assets, hasNextPage, isLimited);
+        RCTResolvePromise(resolve, assets, hasNextPage);
         resolvedPromise = YES;
         return;
       }
@@ -396,7 +380,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
               @"filename": (includeFilename && originalFilename ? originalFilename : [NSNull null]),
               @"height": (includeImageSize ? @([asset pixelHeight]) : [NSNull null]),
               @"width": (includeImageSize ? @([asset pixelWidth]) : [NSNull null]),
-              @"fileSize": (includeFileSize && fileSize ? fileSize : [NSNull null]),
+              @"fileSize": (includeFileSize ? fileSize : [NSNull null]),
               @"playableDuration": (includePlayableDuration && asset.mediaType != PHAssetMediaTypeImage
                                     ? @([asset duration]) // fractional seconds
                                     : [NSNull null])
@@ -431,7 +415,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
     // If we get this far and haven't resolved the promise yet, we reached the end of the list of photos
     if (!resolvedPromise) {
       hasNextPage = NO;
-      RCTResolvePromise(resolve, assets, hasNextPage, isLimited);
+      RCTResolvePromise(resolve, assets, hasNextPage);
       resolvedPromise = YES;
     }
   });
@@ -442,7 +426,7 @@ RCT_EXPORT_METHOD(deletePhotos:(NSArray<NSString *>*)assets
                   reject:(RCTPromiseRejectBlock)reject)
 {
   NSMutableArray *convertedAssets = [NSMutableArray array];
-
+  
   for (NSString *asset in assets) {
     [convertedAssets addObject: [asset stringByReplacingOccurrencesOfString:@"ph://" withString:@""]];
   }
